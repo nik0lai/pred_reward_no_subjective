@@ -1,0 +1,1532 @@
+---
+title: "reproduction paper ordinal modeling"
+author: 'Nicolás Sánchez-Fuenzlida'
+date: '14-11-2022'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Packages
+if (!require('pacman', quietly = TRUE)) install.packages('pacman'); library('pacman', quietly = TRUE)
+p_load(here, readr, BayesFactor, magrittr, dplyr, purrr, stringr, ggplot2)
+```
+
+```{r}
+set.seed(seed = 12345)
+```
+
+## Data
+
+```{r}
+dat <- 
+  read_csv(here('data/processed/rep_bias_and_reproduction.csv')) %>% 
+  mutate(cond_code = paste0(substr(bias_source, 1, 2), substr(bias_direction, 1, 2)))
+
+```
+
+### Filter data
+
+```{r}
+
+# True keeps discrimination data.
+# False keeps reproduction data
+analyze_decision <- TRUE
+
+if (analyze_decision) {
+  task_name <- 'decision'
+  dat <-
+    dat %>% 
+    select(-c(rep,d)) %>% 
+    rename(value = ccrit)
+} else {
+  task_name <- 'reproduction'
+  dat <-
+    dat %>% 
+    select(-c(ccrit,d)) %>% 
+    rename(value = rep)
+}
+
+# Sort data
+dat <- dat %>% 
+  arrange(bias_source, bias_direction)
+
+# Count subjects
+dat %>% 
+  group_by(bias_source) %>% 
+  select(bias_source, participant) %>% 
+  distinct() %>% 
+  summarise(count = n())
+ 
+```
+
+## Function
+
+```{r}
+
+# Gets unconstrained comparison BF and posterior samples
+get_bf_samp <- function(y, x, gMap, rscale, no_iter, filter_iter) {
+  
+  # Compute BF
+  out_bf <- nWayAOV(y, x, gMap, rscale = rep(rscale, length(unique(gMap))))
+  # Sample posterior
+  out_samp <- nWayAOV(y, x, gMap, rscale = rep(rscale, length(unique(gMap)))
+                      , posterior = TRUE, iterations = no_iter)
+  # Filter first n% of the iterations
+  out_samp <- out_samp[(nrow(out_samp) * filter_iter) : nrow(out_samp),]
+  # return bf and sample
+  return(list(out_bf, out_samp))
+}
+
+# Make contrast image to check that coding looks fine
+make_condition_contrast_image <- function(contrast) {
+  
+  contrast %>% 
+    as_tibble() %>% 
+    select(matches('x[0-9]{1}$', perl = TRUE)) %>% 
+    as.matrix() %>% 
+    t() %>% 
+    image()
+  
+}
+
+# Get gMap based on contrast columns
+
+get_gMap <- function(contrast) {
+  # This gMap is used if no sub-effect
+  gMap <- 1:(length(grep('x[0-9]{1}$', colnames(contrast), value = TRUE)))
+  # Include participant contrast to gMap
+  gMap <- c(rep(0, length(grep('x[0-9]{2,3}$', colnames(contrast), value = TRUE))), gMap)
+  return(gMap)
+}
+
+## Contrast functions ---------
+
+get_id_contrast <- function(id_col) {
+  
+  # get unique ids (there are two per participant)
+  unique_ids <- id_col %>% pull(id) %>% unique()
+  # make id contrast matrix
+  id_contrast <- 
+    
+    map2(unique_ids, seq(length(unique_ids)),
+         ~ id_col %>% 
+           transmute(as.integer(id == .x)) %>% 
+           # The column names start from 10 because the first 10 
+           # names are reserved for the contrast indicating the 
+           # bias condition.
+           set_names(paste0('x', .y + 10))
+    ) %>% 
+    bind_cols()
+  
+  # Convert to matrix to combine with other
+  # contrast matrices
+  id_contrast <- 
+    as.matrix(id_contrast)
+  
+  return(id_contrast)
+  
+}
+
+get_contrast_A <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  x2 <- ifelse(dat$cond_code == "mulo", .5, 
+               ifelse(dat$cond_code == "mush", -.5, 0))    # ML bias direction effect
+  # Base rate
+  x3 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  x4 <- ifelse(dat$cond_code == "balo", .5, 
+               ifelse(dat$cond_code == "bash", -.5, 0))    # BR bias direction effect
+  # Payoff
+  # The payoff condition is used as the intercept so it's not indicated in
+  # contrast matrix and instead is always the 'mu' column in the sample data.
+  x5 <- ifelse(dat$cond_code == "palo", .5, 
+               ifelse(dat$cond_code == "pash", -.5, 0))    # PO bias direction effect
+  
+  # Combine all contrast columns into one matrix
+  X_a <- cbind(x1, x2, x3, x4, x5)
+  
+  # Add id contrast
+  X_a <- 
+    cbind(
+      id_contrast,
+      X_a)
+  
+  return(X_a)
+}
+
+get_contrast_B <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  # Base rate
+  x2 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  # Bias direction irrespective of bias source
+  x3 <- ifelse(dat$bias_direction == 'long', .5,       # bias direction effect
+               ifelse(dat$bias_direction == 'short', -.5, 0))
+  
+  # Combine all contrast columns into one matrix
+  X_b <- cbind(x1, x2, x3)
+  
+  # Add id contrast
+  X_b <- 
+    cbind(
+      id_contrast,
+      X_b)
+  
+  return(X_b)
+}
+
+get_contrast_C <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  # Base rate
+  x2 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  # Muller-Lyer & Base rate bias direction
+  x3 <- ifelse(dat$cond_code %in% c("mulo", "balo"), .5,  
+               ifelse(dat$cond_code %in% c("mush", "bash"), -.5, 0)) # bias direction effect
+  # Payoff
+  # The payoff condition is used as the intercept so it's not indicated in
+  # contrast matrix and instead is always the 'mu' column in the sample data.
+  x4 <- ifelse(dat$cond_code == "palo", .5, 
+               ifelse(dat$cond_code == "pash", -.5, 0))    # PO bias direction effect
+  
+  # Combine all contrast columns into one matrix
+  X_c <- cbind(x1, x2, x3, x4)
+  
+  # Add id contrast
+  X_c <- 
+    cbind(
+      id_contrast,
+      X_c)
+  
+  return(X_c)
+}
+
+get_contrast_D <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  # Muller-Lyer & Payoff bias direction
+  x2 <- ifelse(dat$cond_code %in% c("mulo", "palo"), .5,  
+               ifelse(dat$cond_code %in% c("mush", "pash"), -.5, 0)) # bias direction effect
+  
+  # Base rate
+  x3 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  x4 <- ifelse(dat$cond_code == "balo", .5, 
+               ifelse(dat$cond_code == "bash", -.5, 0))    # BR bias direction effect
+  
+  # Combine all contrast columns into one matrix
+  X_d <- cbind(x1, x2, x3, x4)
+  
+  # Add id contrast
+  X_d <- 
+    cbind(
+      id_contrast,
+      X_d)
+  
+  return(X_d)
+}
+
+get_contrast_E <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  x2 <- ifelse(dat$cond_code == "mulo", .5, 
+               ifelse(dat$cond_code == "mush", -.5, 0))    # ML bias direction effect
+  # Base rate
+  x3 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  
+  # Combine all contrast columns into one matrix
+  X_e <- cbind(x1, x2, x3)
+  
+  # Add id contrast
+  X_e <- 
+    cbind(
+      id_contrast,
+      X_e)
+  
+  return(X_e)
+}
+
+get_contrast_F <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  # Base rate
+  x2 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  
+  # Combine all contrast columns into one matrix
+  X_f <- cbind(x1, x2)
+  
+  # Add id contrast
+  X_f <- 
+    cbind(
+      id_contrast,
+      X_f)
+  
+  return(X_f)
+}
+
+get_contrast_G <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  x2 <- ifelse(dat$cond_code == "mulo", .5, 
+               ifelse(dat$cond_code == "mush", -.5, 0))    # ML bias direction effect
+  # Base rate
+  x3 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  x4 <- ifelse(dat$cond_code == "balo", .5, 
+               ifelse(dat$cond_code == "bash", -.5, 0))    # BR bias direction effect
+  
+  # Combine all contrast columns into one matrix
+  X_g <- cbind(x1, x2, x3, x4)
+  
+  # Add id contrast
+  X_g <- 
+    cbind(
+      id_contrast,
+      X_g)
+  
+  return(X_g)
+}
+
+get_contrast_H <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  x2 <- ifelse(dat$cond_code == "mulo", .5, 
+               ifelse(dat$cond_code == "mush", -.5, 0))    # ML bias direction effect
+  # Base rate
+  x3 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  # Payoff
+  # The payoff condition is used as the intercept so it's not indicated in
+  # contrast matrix and instead is always the 'mu' column in the sample data.
+  x4 <- ifelse(dat$cond_code == "palo", .5, 
+               ifelse(dat$cond_code == "pash", -.5, 0))    # PO bias direction effect
+  
+  
+  # Combine all contrast columns into one matrix
+  X_h <- cbind(x1, x2, x3, x4)
+  
+  # Add id contrast
+  X_h <- 
+    cbind(
+      id_contrast,
+      X_h)
+  
+  return(X_h)
+}
+
+
+get_contrast_I <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  
+  x2 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  x3 <- ifelse(dat$cond_code == "balo", .5, 
+               ifelse(dat$cond_code == "bash", -.5, 0))    # BR bias direction effect
+  # Payoff
+  # The payoff condition is used as the intercept so it's not indicated in
+  # contrast matrix and instead is always the 'mu' column in the sample data.
+  x4 <- ifelse(dat$cond_code == "palo", .5, 
+               ifelse(dat$cond_code == "pash", -.5, 0))    # PO bias direction effect
+  
+  
+  # Combine all contrast columns into one matrix
+  X_i <- cbind(x1, x2, x3, x4)
+  
+  # Add id contrast
+  X_i <- 
+    cbind(
+      id_contrast,
+      X_i)
+  
+  return(X_i)
+}
+
+get_contrast_J <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  # Base rate
+  x2 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  # Payoff
+  x3 <- ifelse(dat$cond_code == "palo", .5, 
+               ifelse(dat$cond_code == "pash", -.5, 0))    # ML bias direction effect
+  
+  # Combine all contrast columns into one matrix
+  X_j <- cbind(x1, x2, x3)
+  
+  # Add id contrast
+  X_j <- 
+    cbind(
+      id_contrast,
+      X_j)
+  
+  return(X_j)
+}
+
+get_contrast_K <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  # Base rate
+  x2 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  x3 <- ifelse(dat$cond_code == "balo", .5, 
+               ifelse(dat$cond_code == "bash", -.5, 0))    # ML bias direction effect
+  
+  # Combine all contrast columns into one matrix
+  X_k <- cbind(x1, x2, x3)
+  
+  # Add id contrast
+  X_k <- 
+    cbind(
+      id_contrast,
+      X_k)
+  
+  return(X_k)
+}
+
+get_contrast_L <- function(dat) {
+  
+  # Muller-Lyer
+  x1 <- ifelse(dat$cond_code %in% c("mulo", "mush"), 1, 0) # ML intercept
+  # Muller-Lyer bias direction
+  x2 <- ifelse(dat$cond_code == "mulo", .5, 
+               ifelse(dat$cond_code == "mush", -.5, 0))    # BR bias direction effect
+  # Base rate
+  x3 <- ifelse(dat$cond_code %in% c("balo", "bash"), 1, 0) # BR intercept
+  # Base rate & Payoff bias direction
+  x4 <- ifelse(dat$cond_code %in% c("balo", "palo"), .5,  
+               ifelse(dat$cond_code %in% c("bash", "pash"), -.5, 0)) # bias direction effect
+  
+  
+  
+  # Combine all contrast columns into one matrix
+  X_l <- cbind(x1, x2, x3, x4)
+  
+  # Add id contrast
+  X_l <- 
+    cbind(
+      id_contrast,
+      X_l)
+  
+  return(X_l)
+}
+
+
+```
+
+## Bayes sampling
+
+### Settings
+
+Same settings for all models.
+
+```{r}
+# Iteration N
+no_iter <- 5000
+filter_iter <- .1
+# R scale (effect size)
+r <- .707
+```
+
+
+## Contrast matrices
+
+### Subject contrast
+
+This chunk creates a contrast matrix to indicate to which subject each observation belongs.
+
+```{r}
+# Run analysis including subject contrast?
+include_id_contrast = TRUE
+
+# Get id contrast matrix
+id_contrast <- get_id_contrast(dat %>% select(participant) %>% rename(id=participant))
+
+# Display matrix
+image(t(id_contrast))
+
+```
+
+### Contrast A: all conditions are different, Muller-Lyer condition as baseline.
+
+```{r}
+# Get contrast
+X_a <- get_contrast_A(dat)
+# Full contrast image
+image(t(X_a))
+# Only manipulation contrast
+make_condition_contrast_image(X_a)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_a)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_a, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_a <- out[[1]]
+# Get sampled data
+samp_out_a <- out[[2]]
+```
+
+##### Check estimated values
+
+```{r}
+checkmeans_a <- with(dat, tapply(value, cond_code, mean))
+pm.effest.a <- colMeans(samp_out_a)
+```
+
+Contrast A :
+
+- mu: pay-off intercept
+- beta 1: muller-lyer intercept
+- beta 2: muller-lyer (long-short)
+- beta 3: base-rate intercept
+- beta 4: base-rate (long-short)
+- beta 5: pay-off (long-short)
+
+```{r}
+
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_a)))
+
+# Rename columns
+sampled_means_a <-
+  set_names(pm.effest.a[c('mu', beta_names)], c('mu', 'ml_int', 'ml_bd', 'br_int', 'br_bd', 'po_bd'))
+
+# Compare means
+checkmeans_a 
+c(
+  'balo' = sampled_means_a['mu'] + sampled_means_a['br_int'] + .5 * sampled_means_a['br_bd'],
+  'bash' = sampled_means_a['mu'] + sampled_means_a['br_int'] - .5 * sampled_means_a['br_bd'],
+  
+  'mulo' = sampled_means_a['mu'] + sampled_means_a['ml_int'] + .5 * sampled_means_a['ml_bd'],
+  'mush' = sampled_means_a['mu'] + sampled_means_a['ml_int'] - .5 * sampled_means_a['ml_bd'],
+  
+  'palo' = sampled_means_a['mu'] + .5 * sampled_means_a['po_bd'],
+  'palo' = sampled_means_a['mu'] - .5 * sampled_means_a['po_bd']
+)
+
+```
+
+### Contrast B: all within cond effects are the same size.
+
+```{r}
+# Get contrast
+X_b <- get_contrast_B(dat)
+# Full contrast image
+image(t(X_b))
+# Only manipulation contrast
+make_condition_contrast_image(X_b)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_b)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_b, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_b <- out[[1]]
+# Get sampled data
+samp_out_b <- out[[2]]
+```
+##### Check estimated values
+
+```{r}
+checkmeans_b <- with(dat, tapply(value, cond_code, mean))
+pm.effest.b <- colMeans(samp_out_b)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: base-rate intercept
+- beta 3: (mulo,balo,palo) - (mush,bash,pash)
+
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_b)))
+
+# Rename columns
+sampled_means_b <- 
+  set_names(pm.effest.b[c('mu', beta_names)], c('mu', 'ml_int', 'br_int', 'mlbrpo_bd'))
+
+# Compare means
+checkmeans_a
+c(
+  
+  'balo' = sampled_means_b['mu'] + sampled_means_b['br_int'] + .5 * sampled_means_b['mlbrpo_bd'],
+  'bash' = sampled_means_b['mu'] + sampled_means_b['br_int'] - .5 * sampled_means_b['mlbrpo_bd'],
+  
+  'mulo' = sampled_means_b['mu'] + sampled_means_b['ml_int'] + .5 * sampled_means_b['mlbrpo_bd'],
+  'mush' = sampled_means_b['mu'] + sampled_means_b['ml_int'] - .5 * sampled_means_b['mlbrpo_bd'],
+  
+  'palo' = sampled_means_b['mu']  + .5 * sampled_means_b['mlbrpo_bd'],
+  'palo' = sampled_means_b['mu']  - .5 * sampled_means_b['mlbrpo_bd']
+  
+)
+```
+
+### Contrast C: Bias direction effect is equal in Muller-Lyer and Baserate, different in Payoff [(ML == BR) != PO]
+
+```{r}
+# Get contrast
+X_c <- get_contrast_C(dat)
+# Full contrast image
+image(t(X_c))
+# Only manipulation contrast
+make_condition_contrast_image(X_c)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_c)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_c, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_c <- out[[1]]
+# Get sampled data
+samp_out_c <- out[[2]]
+```
+
+##### Check estimated values
+
+```{r}
+checkmeans_c <- checkmeans_a
+pm.effest.c <- colMeans(samp_out_c)
+```
+
+Contrasts: 
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: base-rate intercept
+- beta 3: (mulo, balo) - (mush, bash)
+- beta 4: payoff (long-short)
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_c)))
+# Rename columns
+sampled_means_c <- 
+  set_names(pm.effest.c[c('mu', beta_names)], c('mu', 'ml_int', 'br_int', 'mlbr_bd', 'po_bd'))
+
+# Compare means
+checkmeans_c
+c(
+  
+  'balo' = sampled_means_c['mu'] +  sampled_means_c['br_int'] + .5 * sampled_means_c['mlbr_bd'],
+  'bash' = sampled_means_c['mu'] +  sampled_means_c['br_int'] - .5 * sampled_means_c['mlbr_bd'],
+  
+  'mulo' = sampled_means_c['mu'] + sampled_means_c['ml_int']  + .5 * sampled_means_c['mlbr_bd'],
+  'mush' = sampled_means_c['mu'] + sampled_means_c['ml_int']  - .5 * sampled_means_c['mlbr_bd'],
+  
+  'palo' = sampled_means_c['mu'] + .5 * sampled_means_c['po_bd'],
+  'palo' = sampled_means_c['mu'] - .5 * sampled_means_c['po_bd']
+  
+)
+
+```
+
+### Contrast D: Bias direction effect is equal in Muller-Lyer and Payoff, different in Base rate [(ML == PO) != BR]
+
+```{r}
+# Get contrast
+X_d <- get_contrast_D(dat)
+# Full contrast image
+image(t(X_d))
+# Only manipulation contrast
+make_condition_contrast_image(X_d)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_d)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_d, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_d <- out[[1]]
+# Get sampled data
+samp_out_d <- out[[2]]
+```
+
+##### Check estimated values
+
+```{r}
+checkmeans_d <- checkmeans_a
+pm.effest.d <- colMeans(samp_out_d)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: (mulo, palo) - (mush, pash)
+- beta 3: base-rate intercept
+- beta 4: base-rate (long-short)
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_d)))
+
+# Rename columns
+sampled_means_d <- 
+  set_names(pm.effest.d[c('mu', beta_names)], c('mu', 'ml_int', 'mlpo_bd', 'br_int', 'br_bd'))
+
+# Compare means
+checkmeans_d
+c(
+  
+  'balo' = sampled_means_d['mu'] + sampled_means_d['br_int'] + .5 * sampled_means_d['br_bd'],
+  'bash' = sampled_means_d['mu'] + sampled_means_d['br_int'] - .5 * sampled_means_d['br_bd'], 
+  
+  'mulo' = sampled_means_d['mu'] + sampled_means_d['ml_int'] + .5 * sampled_means_d['mlpo_bd'],
+  'mush' = sampled_means_d['mu'] + sampled_means_d['ml_int'] - .5 * sampled_means_d['mlpo_bd'],
+  
+  'palo' = sampled_means_d['mu']  + .5 * sampled_means_d['mlpo_bd'],
+  'palo' = sampled_means_d['mu']  - .5 * sampled_means_d['mlpo_bd']
+  
+)
+
+```
+
+### Contrast E: Bias direction effect in the Muller-Lyer condition, no effect in base rate and payoff [(mulo > mush) & (balo == bash) & (palo = pash)]
+
+```{r}
+# Get contrast
+X_e <- get_contrast_E(dat)
+# Full contrast image
+image(t(X_e))
+# Only manipulation contrast
+make_condition_contrast_image(X_e)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_e)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_e, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_e <- out[[1]]
+# Get sampled data
+samp_out_e <- out[[2]]
+```
+
+#### Check estimated values
+
+```{r}
+pm.effest.e <- colMeans(samp_out_e)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: muller-lyer (long-short)
+- beta 3: base-rate intercept
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_e)))
+
+# Rename columns
+sampled_means_e <- 
+  set_names(pm.effest.e[c('mu', beta_names)], c('mu', 'ml_int', 'ml_bd', 'br_int'))
+c(
+  'ba' = mean(checkmeans_a['balo'], checkmeans_a['bash']),
+  'pa' =mean(checkmeans_a['palo'], checkmeans_a['pash']),
+  checkmeans_a[c('mulo', 'mush')]
+)
+
+c(
+  
+  'ba' = sampled_means_e['mu'] + sampled_means_e['br_int'],
+  'pa' = sampled_means_e['mu'],
+  
+  'mulo' = sampled_means_e['mu'] + sampled_means_e['ml_int'] + .5 * sampled_means_e['ml_bd'],
+  'mush' = sampled_means_e['mu'] + sampled_means_e['ml_int'] - .5 * sampled_means_e['ml_bd']
+  
+  
+)
+
+```
+
+### Contrast F: No effect in any bias source [(mulo = mush) != (balo == bash) != (palo = pash)]
+
+```{r}
+# Get contrast
+X_f <- get_contrast_F(dat)
+# Full contrast image
+image(t(X_f))
+# Only manipulation contrast
+make_condition_contrast_image(X_f)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_f)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_f, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_f <- out[[1]]
+# Get sampled data
+samp_out_f <- out[[2]]
+```
+
+#### Check estimated values
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: base-rate intercept
+
+```{r}
+checkmeans_f <- with(dat, tapply(value, bias_source, mean))
+pm.effest.f <- colMeans(samp_out_f)
+```
+
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_f)))
+
+# Rename columns
+sampled_means_f <- 
+  set_names(pm.effest.f[c('mu', beta_names)], c('mu', 'ml_int', 'br_int'))
+
+
+# Compare means
+checkmeans_f
+c(
+  'ba' = sampled_means_f['mu'] + sampled_means_f['br_int'],
+  'ml' = sampled_means_f['mu'] + sampled_means_f['ml_int'],
+  'pa' = sampled_means_f['mu']
+)
+
+```
+### Contrast G: Bias direction effect in base rate and Muller-Lyer, no effect in payoff [(mulo > mush) > (balo > bash) & (palo = pash)]
+
+```{r}
+# Get contrast
+X_g <- get_contrast_G(dat)
+# Full contrast image
+image(t(X_g))
+# Only manipulation contrast
+make_condition_contrast_image(X_g)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_g)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_g, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_g <- out[[1]]
+# Get sampled data
+samp_out_g <- out[[2]]
+```
+
+
+#### Check estimated values
+
+```{r}
+pm.effest.g <- colMeans(samp_out_g)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: muller-lyer (long-short)
+- beta 3: base-rate intercept
+- beta 4: base-rate (long-short)
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_g)))
+
+# Rename columns
+sampled_means_g <- 
+  set_names(pm.effest.g[c('mu', beta_names)], c('mu', 'ml_int', 'ml_bd', 'br_int', 'br_bd'))
+```
+
+
+```{r}
+
+c(
+  checkmeans_a['balo'], 
+  checkmeans_a['bash'],
+  checkmeans_a[c('mulo', 'mush')],
+  'pa'=mean(checkmeans_a['palo'], checkmeans_a['pash'])
+)
+c(
+  'balo' = sampled_means_g['mu'] + sampled_means_g['br_int'] + .5 * sampled_means_g['br_bd'],
+  'bash' = sampled_means_g['mu'] + sampled_means_g['br_int'] - .5 * sampled_means_g['br_bd'],
+  
+  'mulo' = sampled_means_g['mu'] + sampled_means_g['ml_int'] + .5 * sampled_means_g['ml_bd'],
+  'mulo' = sampled_means_g['mu'] + sampled_means_g['ml_int'] - .5 * sampled_means_g['ml_bd'],
+  
+  'pa' = sampled_means_g['mu']
+)
+
+```
+
+
+### Contrast H: Bias direction effect in Payoff and Muller-Lyer, no effect in base rate [(mulo > mush) > (palo > pash) & (balo = bash)]
+
+```{r}
+# Get contrast
+X_h <- get_contrast_H(dat)
+# Full contrast image
+image(t(X_h))
+# Only manipulation contrast
+make_condition_contrast_image(X_h)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_h)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_h, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_h <- out[[1]]
+# Get sampled data
+samp_out_h <- out[[2]]
+```
+
+#### Check estimated values
+
+```{r}
+pm.effest.h <- colMeans(samp_out_h)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: muller-lyer (long-short)
+- beta 3: payoff intercept
+- beta 4: payoff (long-short)
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_h)))
+
+# Rename columns
+sampled_means_h <- 
+  set_names(pm.effest.h[c('mu', beta_names)], c('mu', 'ml_int', 'ml_bd', 'br_int', 'po_bd'))
+```
+
+
+```{r}
+
+c(
+  checkmeans_a['palo'], 
+  checkmeans_a['pash'],
+  checkmeans_a[c('mulo', 'mush')],
+  'ba' = mean(checkmeans_a['balo'], checkmeans_a['bash'])
+)
+
+c(
+  
+  'palo' = sampled_means_h['mu']  + .5 * sampled_means_h['po_bd'],
+  'pash' = sampled_means_h['mu'] - .5 * sampled_means_h['po_bd'],
+  
+  'mulo' = sampled_means_h['mu'] + sampled_means_h['ml_int'] + .5 * sampled_means_h['ml_bd'],
+  'mush' = sampled_means_h['mu'] + sampled_means_h['ml_int'] - .5 * sampled_means_h['ml_bd'],
+  
+  'ba' = sampled_means_h['mu']
+  
+)
+
+```
+
+### Contrast I: Bias direction effect in Payoff and Base rate, no effect in payoff [(mulo > mush) > (balo > bash) & (palo = pash)]
+
+```{r}
+# Get contrast
+X_i <- get_contrast_I(dat)
+# Full contrast image
+image(t(X_i))
+# Only manipulation contrast
+make_condition_contrast_image(X_i)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_i)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_i, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_i <- out[[1]]
+# Get sampled data
+samp_out_i <- out[[2]]
+```
+
+#### Check estimated values
+
+```{r}
+pm.effest.i <- colMeans(samp_out_i)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: base-rate intercept
+- beta 3: base-rate (long-short)
+- beta 4: payoff (long-short)
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_i)))
+
+# Rename columns
+sampled_means_i <- 
+  set_names(pm.effest.i[c('mu', beta_names)], c('mu', 'ml_int', 'br_int', 'br_bd', 'po_bd'))
+```
+
+
+```{r}
+
+
+c(mu = mean(checkmeans_a[c('mulo', 'mush')]), checkmeans_a[c('palo', 'pash', 'balo', 'bash')])
+
+c(
+  'mulo' = sampled_means_i['mu'] + sampled_means_i['ml_int'],
+  
+  'palo' = sampled_means_i['mu']  + .5 * sampled_means_i['po_bd'],
+  'pash' = sampled_means_i['mu'] - .5 * sampled_means_i['po_bd'],
+  
+  'balo' = sampled_means_i['mu'] + sampled_means_i['br_int'] + .5 * sampled_means_i['br_bd'],
+  'bash' = sampled_means_i['mu'] + sampled_means_i['br_int'] - .5 * sampled_means_i['br_bd']
+  
+)
+
+```
+
+### Contrast J: Bias direction effect in the payoff condition, no effect in base rate and muller lyer [(palo > pash) & (balo == bash) & (mulo = mush)]
+
+```{r}
+# Get contrast
+X_j <- get_contrast_J(dat)
+# Full contrast image
+image(t(X_j))
+# Only manipulation contrast
+make_condition_contrast_image(X_j)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_j)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_j, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_j <- out[[1]]
+# Get sampled data
+samp_out_j <- out[[2]]
+```
+
+#### Check estimated values
+
+```{r}
+pm.effest.j <- colMeans(samp_out_j)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: base-rate intercept
+- beta 3: payoff (long-short)
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_j)))
+
+# Rename columns
+sampled_means_j <- 
+  set_names(pm.effest.j[c('mu', beta_names)], c('mu', 'ml_int', 'br_int', 'pa_bd'))
+```
+
+
+```{r}
+
+c(
+  'ba' = mean(checkmeans_a['balo'], checkmeans_a['bash']),
+  'mu' = mean(checkmeans_a[c('mulo', 'mush')]),
+  checkmeans_a['palo'], 
+  checkmeans_a['pash']
+)
+
+c(
+  
+  'ba' = sampled_means_j['mu'] + sampled_means_j['br_int'],
+  'mu' = sampled_means_j['mu'] + sampled_means_j['ml_int'],
+  
+  'palo' = sampled_means_j['mu'] + .5 * sampled_means_j['pa_bd'],
+  'pash' = sampled_means_j['mu'] - .5 * sampled_means_j['pa_bd']
+  
+  
+)
+
+```
+
+### Contrast K: Bias direction effect in the base-rate condition, no effect in payoff and muller lyer [(balo > bash) & (palo == pash) & (mulo = mush)]
+
+```{r}
+# Get contrast
+X_k <- get_contrast_K(dat)
+# Full contrast image
+image(t(X_k))
+# Only manipulation contrast
+make_condition_contrast_image(X_k)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_k)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_k, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_k <- out[[1]]
+# Get sampled data
+samp_out_k <- out[[2]]
+```
+
+#### Check estimated values
+
+```{r}
+pm.effest.k <- colMeans(samp_out_k)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: base-rate intercept
+- beta 3: payoff (long-short)
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_k)))
+
+# Rename columns
+sampled_means_k <- 
+  set_names(pm.effest.k[c('mu', beta_names)], c('mu', 'ml_int', 'br_int', 'ba_bd'))
+
+c(
+  'balo' = checkmeans_a['balo'],
+  'bash' = checkmeans_a['bash'],
+  'mu' = mean(checkmeans_a[c('mulo', 'mush')]),
+  'pa' = mean(checkmeans_a['palo'], checkmeans_a['pash'])
+)
+
+c(
+  
+  'balo' = sampled_means_k['mu'] + sampled_means_k['br_int'] + .5 * sampled_means_k['ba_bd'],
+  'bash' = sampled_means_k['mu'] + sampled_means_k['br_int'] - .5 * sampled_means_k['ba_bd'],
+  'mu' = sampled_means_k['mu'] + sampled_means_k['ml_int'],
+  'palo' = sampled_means_k['mu'] 
+  
+)
+
+```
+
+### Contrast L: Bias direction effect is equal in Base rate and Payoff, different in Muller-Lyer [(BR == PO) != ML]
+
+```{r}
+# Get contrast
+X_l <- get_contrast_L(dat)
+# Full contrast image
+image(t(X_l))
+# Only manipulation contrast
+make_condition_contrast_image(X_l)
+```
+
+#### nWayAov
+
+```{r}
+# Get gMap
+gMap <- get_gMap(X_l)
+# Run nWayAOV
+out <- get_bf_samp(y = dat$value, x = X_l, gMap = gMap, rscale = r, 
+                   no_iter = no_iter, filter_iter = filter_iter)
+# Get simple BF 
+bf_out_l <- out[[1]]
+# Get sampled data
+samp_out_l <- out[[2]]
+```
+
+##### Check estimated values
+
+```{r}
+checkmeans_l <- checkmeans_a
+pm.effest.l <- colMeans(samp_out_l)
+```
+
+Contrasts:
+
+- mu: payoff intercept
+- beta 1: muller-lyer intercept
+- beta 2: muller-lyer (long-short)
+- beta 3: base-rate intercept
+- beta 4: (balo, palo) - (bash, pash)
+
+```{r}
+# get bias manipulation beta names
+beta_names <- paste0('beta_', grep('x[0-9]{1}$', colnames(X_l)))
+
+# Rename columns
+sampled_means_l <- 
+  set_names(pm.effest.l[c('mu', beta_names)], c('mu', 'ml_int', 'ml_bd', 'br_int', 'brpo_bd'))
+
+# Compare means
+checkmeans_l
+c(
+  
+  'balo' = sampled_means_l['mu'] + sampled_means_l['br_int'] + .5 * sampled_means_l['brpo_bd'],
+  'bash' = sampled_means_l['mu'] + sampled_means_l['br_int'] - .5 * sampled_means_l['brpo_bd'], 
+  
+  'mulo' = sampled_means_l['mu'] + sampled_means_l['ml_int'] + .5 * sampled_means_l['ml_bd'],
+  'mush' = sampled_means_l['mu'] + sampled_means_l['ml_int'] - .5 * sampled_means_l['ml_bd'],
+  
+  'palo' = sampled_means_l['mu']  + .5 * sampled_means_l['brpo_bd'],
+  'palo' = sampled_means_l['mu']  - .5 * sampled_means_l['brpo_bd']
+  
+)
+
+```
+
+
+## Priors
+
+```{r}
+# Parameters for prior sampling
+R <- 1000000
+mu.theta.sd <- 1
+# Prior sample
+ml <- rnorm(R, 0, mu.theta.sd)
+br <- rnorm(R, 0, mu.theta.sd)
+po <- rnorm(R, 0, mu.theta.sd)
+
+```
+
+## Posteriors
+
+```{r}
+
+# Number of participant contrast columns
+add_to_beta_index <- ncol(id_contrast)
+
+### CONTRAST A -----------------------------------------------------------------
+
+make_condition_contrast_image(X_a)
+
+# These refer to the columns where the bias direction effect is
+ml_bd <- paste0('beta_', 2 + add_to_beta_index)
+br_bd <- paste0('beta_', 4 + add_to_beta_index)
+po_bd <- paste0('beta_', 5 + add_to_beta_index)
+
+# 3 bias direction effect sizes, one for each bias source
+ba_bigger_ml <- samp_out_a[, br_bd] > samp_out_a[, ml_bd]
+pa_bigger_ml <- samp_out_a[, po_bd] > samp_out_a[, ml_bd]
+pa_bigger_ba <- samp_out_a[, po_bd] > samp_out_a[, br_bd]
+
+# Priors H-I --------------------------------------------------------
+prior_prob_HH <- mean(br > ml & ml < po & br < po)
+prior_prob_II <- mean(br > ml & ml < po & br > po)
+
+# Model HH (BR > ML < PO) & PO > BR
+post_prob_conHH <- 
+  mean(
+    ba_bigger_ml & pa_bigger_ml & pa_bigger_ba
+  )
+# Model II (BR > ML < PO) & PO < BR
+post_prob_conII <- 
+  mean(
+    ba_bigger_ml & pa_bigger_ml & !pa_bigger_ba
+  )
+
+# Priors J-K -------------------------------------------------------
+
+# Models based on model B
+prior_prob_JJ <- mean(br < ml & ml > po & br < po)
+prior_prob_KK <- mean(br < ml & ml > po & br > po)
+
+# Model MM (BR > ML < PO) & PO > BR
+post_prob_conJJ <- 
+  mean(
+    !ba_bigger_ml & !pa_bigger_ml & pa_bigger_ba
+  )
+# Model NN (BR > ML < PO) & PO < BR
+post_prob_conKK <- 
+  mean(
+    !ba_bigger_ml & !pa_bigger_ml & !pa_bigger_ba
+  )
+
+# Priors L ---------------------------------------------------
+
+# Models based on model C
+prior_prob_LL <- mean(br < ml & ml < po & br < po)
+# prior_prob_MM <- mean(br < ml & ml < po & br > po) This constraint is not possible.
+
+# Model OO (BR > ML < PO) & PO > BR
+post_prob_conLL <- 
+  mean(
+    !ba_bigger_ml & pa_bigger_ml & pa_bigger_ba
+  )
+
+# # Model PP (BR > ML < PO) & PO < BR -> THIS MODEL IS NOT POSSIBLE
+# post_prob_conMM <- 
+#   mean(
+#     !ba_bigger_ml & pa_bigger_ml & !pa_bigger_ba
+#   )
+
+# Priors M --------------------------------------------------------
+
+# Models based on model C
+# prior_prob_QQ <- mean(br > ml & ml > po & br < po) This constraint is not possible.
+prior_prob_MM <- mean(br > ml & ml > po & br > po)
+
+# # Model QQ (BR > ML < PO) & PO > BR -> THIS MODEL IS NOT POSSIBLE
+# post_prob_conQQ <- 
+#   mean(
+#     ba_bigger_ml & !pa_bigger_ml & pa_bigger_ba
+#   )
+# Model RR (BR > ML < PO) & PO < BR
+post_prob_conMM <- 
+  mean(
+    ba_bigger_ml & !pa_bigger_ml & !pa_bigger_ba
+  )
+
+```
+
+
+```{r}
+
+# Priors
+prior_prob_BB <- mean(ml&br < po)
+prior_prob_CC <- mean(ml&br > po)
+
+### CONTRAST C -----------------------------------------------------------------
+make_condition_contrast_image(X_c)
+
+# (ml == br) </> po
+mlbr_bd <- paste0('beta_', 3 + add_to_beta_index)
+po_bd <- paste0('beta_', 4 + add_to_beta_index)
+
+#  ML=BR < PO
+pa_bigger_mlbr <- samp_out_c[,mlbr_bd] < samp_out_c[,po_bd]
+post_prob_conBB <-  
+  mean(
+    pa_bigger_mlbr
+  )
+
+#  ML=BR > PO
+mlbr_bigger_pa <- samp_out_c[,mlbr_bd] > samp_out_c[,po_bd]
+post_prob_conCC <-  
+  mean(
+    mlbr_bigger_pa
+  )
+
+```
+
+```{r}
+
+# Priors
+prior_prob_DD <- mean(ml&po < br)
+prior_prob_EE <- mean(ml&po > br)
+
+### CONTRAST D -----------------------------------------------------------------
+
+make_condition_contrast_image(X_d)
+
+# (ml == po) </> br
+mlpo_bd <- paste0('beta_', 2 + add_to_beta_index)
+br_bd <- paste0('beta_', 4 + add_to_beta_index)
+
+#  ML=PO < BR
+ba_bigger_mlpa <- samp_out_d[, mlpo_bd] < samp_out_d[,br_bd]
+post_prob_conDD <-  
+  mean(
+    ba_bigger_mlpa
+  )
+
+#  ML=PO > BR
+mlpa_bigger_ba <- samp_out_d[, mlpo_bd] > samp_out_d[,br_bd]
+post_prob_conEE <-  
+  mean(
+    mlpa_bigger_ba
+  )
+
+```
+
+```{r}
+
+# Priors
+prior_prob_FF <- mean(br&po < ml)
+prior_prob_GG <- mean(br&po > ml)
+
+
+### CONTRAST L -----------------------------------------------------------------
+
+make_condition_contrast_image(X_l)
+
+# (br == po) </> ml
+ml_bd <- paste0('beta_', 2 + add_to_beta_index)
+brpo_bd <- paste0('beta_', 4 + add_to_beta_index)
+
+#  BR=PO < ML
+ml_bigger_bapa <- samp_out_l[, brpo_bd] < samp_out_l[,ml_bd]
+post_prob_conFF <-  
+  mean(
+    ml_bigger_bapa
+  )
+
+#  BR=PO > ML
+bapa_bigger_ml <- samp_out_l[, brpo_bd] > samp_out_l[,ml_bd]
+post_prob_conGG <-  
+  mean(
+    bapa_bigger_ml
+  )
+
+```
+
+### Calculate ordinal BF
+
+
+```{r}
+
+# Unconstrained model
+bf_uN <- bf_out_f$bf
+
+# model A: effect on all conditions, no constrained across them
+bf_A <- bf_out_a$bf
+# model B: effect only in Payoff 
+bf_B <- bf_out_j$bf
+# model C: effect only in Muller-Lyer
+bf_C <- bf_out_e$bf
+# model D: effect only in Base rate
+bf_D <- bf_out_k$bf
+# model E: effect in Payoff and Baserate, no effect in Muller-Lyer
+bf_E <- bf_out_i$bf
+# model F: effect in Payoff and Muller-Lyer, no effect in Baserate
+bf_F <- bf_out_h$bf
+# model G: effect in Muller-Lyer and Baserate, no effect in Payoff
+bf_G <- bf_out_g$bf
+
+
+# More-constrained models ---------------------------------
+
+# model AA: BR = ML = PO
+bf_AA <- bf_out_b$bf
+# model BB: (ML = BR) < PO
+bf_BB <- log(post_prob_conBB / prior_prob_BB) + bf_out_c$bf
+# model CC: (ML = BR) > PO
+bf_CC <- log(post_prob_conCC / prior_prob_CC) + bf_out_c$bf
+# model DD: (ML = PO) < BR
+bf_DD <- log(post_prob_conDD / prior_prob_DD) + bf_out_d$bf
+# model EE: (ML = PO) > BR
+bf_EE <- log(post_prob_conEE / prior_prob_EE) + bf_out_d$bf
+# model FF: (BR = PO) < ML
+bf_FF <- log(post_prob_conFF / prior_prob_FF) + bf_out_l$bf
+# model GG: (BR = PO) > ML
+bf_GG <- log(post_prob_conGG / prior_prob_GG) + bf_out_l$bf
+# model HH (BR > ML < PO) & BR < PO
+bf_HH <- log(post_prob_conHH / prior_prob_HH) + bf_out_a$bf
+# model II (BR > ML < PO) & BR > PO
+bf_II <- log(post_prob_conII / prior_prob_II) + bf_out_a$bf
+# model JJ: (BR < ML > PO) & BR < PO
+bf_JJ <- log(post_prob_conJJ / prior_prob_JJ) + bf_out_a$bf
+# model KK: (BR < ML > PO) & BR > PO
+bf_KK <- log(post_prob_conKK / prior_prob_KK) + bf_out_a$bf
+# model LL: (BR < ML < PO) & PO > BR
+bf_LL <- log(post_prob_conLL / prior_prob_LL) + bf_out_a$bf
+# model MM: (BR > ML > PO) & PO < BR
+bf_MM <- log(post_prob_conMM / prior_prob_MM) + bf_out_a$bf
+```
+
+## Make table with bf values
+
+```{r}
+bfs <- 
+  tribble(
+    ~model, ~bf, ~model_label,
+    'a', bf_A, 'BR&ML&PO',
+    'b', bf_B, 'PO',
+    'c', bf_C, 'ML',
+    'd', bf_D, 'BR',
+    'e', bf_E, 'BR & PO', 
+    'f', bf_F, 'ML & PO',
+    'g', bf_G, 'BR & ML',
+    # data-driven models
+    'AA', bf_AA, 'BR = ML = PO',
+    'BB', bf_BB, '(BR=ML) < PO', 
+    'CC', bf_CC, '(BR=ML) > PO', 
+    'DD', bf_DD, '(ML=PO) < BR', 
+    'EE', bf_EE, '(ML=PO) > BR',
+    'FF', bf_FF, '(BR=PO) < ML',
+    'GG', bf_GG, '(BR=PO) > ML',
+    'HH', bf_HH, 'BR > ML < PO & BR < PO',
+    'II', bf_II, 'BR > ML < PO & BR > PO',
+    'JJ', bf_JJ, 'BR < ML > PO & BR < PO',
+    'KK', bf_KK, 'BR < ML > PO & BR > PO',
+    'LL', bf_LL, 'BR < ML < PO & BR < PO',
+    'MM', bf_MM, 'BR > ML > PO & BR > PO',
+    
+    'UN', bf_uN, 'BR & ML & PO (no effect in all manipulations)'
+  )
+
+
+bfs %>% 
+  write_csv(here(sprintf(here('data/processed/rep_ordinal_models_bf_%s.csv'), task_name)))
+
+```
+
