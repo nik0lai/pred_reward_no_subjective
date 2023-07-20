@@ -154,6 +154,14 @@ d_outliers
 c_outliers
 rep_outliers
 
+# Check how many participants per condition was removed
+
+bind_rows(staircase_outliers, low_d_subs, d_outliers, c_outliers, rep_outliers) %>% 
+  select(participant, bias_source) %>% 
+  unique() %>% 
+  group_by(bias_source) %>% 
+  summarise(count = n())
+  
 # Count filtered subjects -------------------------------------------------
 
 # After filtering there are:
