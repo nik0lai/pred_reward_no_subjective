@@ -176,6 +176,25 @@ filtered_data_arrows %>%
   group_by(bias_source) %>% 
   summarise(count = n())
 
+# Count filtered subjects per condition -----------------------------------
+
+bind_rows(filtered_table_exp1 %>% mutate(exp='1'),
+          filtered_table_exp2 %>% mutate(exp='2'),
+          filtered_table_exp3 %>% mutate(exp='3'),
+          filtered_table_arrows %>% mutate(exp='A')) %>% 
+  select(exp, participant, bias_source) %>% 
+  unique() %>% 
+  group_by(exp, bias_source) %>% 
+  summarise(count = n())
+
+
+# Count participants per experiment ---------------------------------------
+
+filtered_data_exp1 %>% select(participant, bias_source) %>% distinct() %>% group_by(bias_source) %>% summarise(count = n())
+filtered_data_exp2 %>% select(participant, bias_source) %>% distinct() %>% group_by(bias_source) %>% summarise(count = n())
+filtered_data_exp3 %>% select(participant, bias_source) %>% distinct() %>% group_by(bias_source) %>% summarise(count = n())
+
+
 # Save data ---------------------------------------------------------------
 
 # Save filtered data
