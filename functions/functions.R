@@ -338,3 +338,19 @@ format_columns_for_hddm <- function(data) {
     mutate(across(c(stim, response), ~ recode(.x, 'long' = 1, 'short' = 0)))
   
 }
+
+
+shorter_bf_value <- function(bf) {
+  if (bf < 1) {
+    bf <- round(bf, 2)
+  } else if (bf > 1) {
+    if (nchar(round(bf)) > 3) {
+      bf <- formatC(bf, format = "e", digits = 1)
+    } else if (round(bf) > 1) {
+      bf <- round(bf)
+    } else {
+      bf <- round(bf, 2)
+    }
+  }
+  return(as.character(bf))
+}
