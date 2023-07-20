@@ -346,7 +346,7 @@ p_traces_delta <-
 # Combine plots -----------------------------------------------------------
 
 ((p_rt_empirical) + (p_traces/p_traces_delta)) + plot_layout(widths = c(.4, 1))
-ggsave(here('plots/ddm_main_figure.png'), width = 9, height = 9, scale = .7, dpi=300)                                                                                                          
+ggsave(here('plots/ddm_main_figure.png'), width = 9, height = 9, scale = .7, dpi=1200)                                                                                                          
 
 # Supplementary figures ---------------------------------------------------
 
@@ -400,11 +400,30 @@ p_rt_empirical +
     data = ppc_data_rt_summary %>% filter(bias_source!='baserate'),
     aes(shape=experiment, x=quantile, y=mean),
     color='darkviolet', alpha=.6, position=dodge) +
-  theme(axis.title.x = element_text(margin = margin(2, 0, 0, 0)),
+  
+  # Recover legend
+  guides(shape=guide_legend(title = "Experiment",
+                            override.aes = list(color = 'black')),
+         linetype=guide_legend(title = 'Experiment'),
+         colour = guide_legend(ncol = 2, nrow = 1, byrow = TRUE, 
+                               override.aes = list(colour=c('black', 
+                                                            lighten('black', .6)), 
+                                                   linetype=c(0,0)))) +
+  # Relabel experiment
+  scale_shape_discrete(labels=c('exp1'='1', 'exp2'='2', 'exp3'='3')) +
+  scale_linetype_discrete(labels=c('exp1'='1', 'exp2'='2', 'exp3'='3')) +
+  # Manually modify color legend to indicate bias direction
+  scale_color_manual(name = 'Bias direction', 
+                     values = get_condition_colors(), 
+                     breaks = c('mullerlyer_long', 'mullerlyer_short'),
+                     labels = c('Long', 'Short')) + 
+  # Reposition legend
+  theme(legend.position = 'bottom',
+        axis.title.x = element_text(margin = margin(2, 0, 0, 0)),
         plot.title = element_text(hjust=0),
-        plot.title.position = 'panel')
+        plot.title.position = 'panel') 
 
-ggsave(here('plots/ddm_rt_predicted_data.png'), width = 6, height = 3, scale = .95)
+ggsave(here('plots/ddm_rt_predicted_data.png'), width = 6, height = 4, scale = .95)
 
 ## Bias and sensitivity all experiments ----------------
 

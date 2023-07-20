@@ -171,7 +171,7 @@ p_traces <-
         plot.margin = unit(c(.1, .1, .2, .1), 'cm')
   )
 
-ggsave(here('plots/ddm_arrowheads_main_figure.png'), height =5, width = 12, scale = .7, dpi=300)
+ggsave(here('plots/ddm_arrowheads_main_figure.png'), height =5, width = 12, scale = .7, dpi=1200)
 
 # Simulated arrowhead bias data ---------------------------------------------
 

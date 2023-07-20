@@ -103,7 +103,7 @@ p_bias  +
 
 # Save plot
 ggsave(here('plots/reproduction_experiment_ordinal_simple_models_decision.png'), 
-       height = 4, width = 5, scale = .6)
+       height = 4, width = 5, scale = .6, dpi=1200)
 
 
 # More constrained models
@@ -132,7 +132,7 @@ bfs_decision_more_constrained %>%
 
 # Save plot
 ggsave(here('plots/reproduction_experiment_ordinal_all_models_decision.png'),
-       height = 6, width = 4, scale = .75)
+       height = 6, width = 4, scale = .75, dpi=1200)
 
 # Reproduction plot -------------------------------------------------------
 
@@ -159,7 +159,7 @@ p_rep  +
 
 # Save plot
 ggsave(here('plots/reproduction_experiment_ordinal_simple_models_reproduction.png'), 
-       height = 4, width = 5, scale = .6)
+       height = 4, width = 5, scale = .6, dpi=1200)
 
 # All models
 bfs_reproduction_more_constrained %>%
@@ -182,4 +182,4 @@ bfs_reproduction_more_constrained %>%
 
 # Save plot
 ggsave(here('plots/reproduction_experiment_ordinal_all_models_reproduction.png'),
-       height = 6, width = 4, scale = .75)
+       height = 6, width = 4, scale = .75, dpi=1200)

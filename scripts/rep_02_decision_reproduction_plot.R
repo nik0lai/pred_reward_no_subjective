@@ -81,7 +81,6 @@ p_bias <-
   # Plot
   rep_base_plot() +
   # Customize plot
-  # scale_x_discrete(expand = c(1, 0)) +
   theme(panel.spacing.x=unit(-1, "lines"),
         axis.title.y = element_textbox_simple(
           halign = .56,
@@ -252,7 +251,8 @@ p_delta_rep
 (p_bias + p_rep) / (p_delta_bias + p_delta_rep) 
 
 ggsave(here('plots/reproduction_experiment_main_results.png'),
-       dpi = 600, height = 9, width = 11, scale = .8)
+       dpi = 1200, height = 9, width = 11, scale = .8)
+
 
 # Sensitivity -------------------------------------------------------------
 
