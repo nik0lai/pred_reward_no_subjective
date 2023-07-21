@@ -1,5 +1,5 @@
-# pred_reward_no_subj
-This repository contains the data and analysis script of the article "Predictions and rewards affect decision-making but not subjective experience"
+# Predictions and rewards affect decision-making but not subjective experience (2022)
+This repository contains the article's data and analysis script.
 
 Pre-print: https://psyarxiv.com/5v8dh
 
